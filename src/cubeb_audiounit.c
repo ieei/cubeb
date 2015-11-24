@@ -136,7 +136,7 @@ audiounit_output_callback(void * user_ptr, AudioUnitRenderActionFlags * flags,
   }
 
   pthread_mutex_unlock(&stm->mutex);
-  got = stm->data_callback(stm, stm->user_ptr, buf, nframes);
+  got = stm->data_callback(stm, stm->user_ptr, NULL, buf, nframes);
   pthread_mutex_lock(&stm->mutex);
   if (got < 0) {
     /* XXX handle this case. */
@@ -539,7 +539,9 @@ static void audiounit_stream_destroy(cubeb_stream * stm);
 
 static int
 audiounit_stream_init(cubeb * context, cubeb_stream ** stream, char const * stream_name,
-                      cubeb_stream_params stream_params, unsigned int latency,
+                      cubeb_stream_params * input_stream_params,
+                      cubeb_stream_params * output_stream_params,
+                      unsigned int latency,
                       cubeb_data_callback data_callback, cubeb_state_callback state_callback,
                       void * user_ptr)
 {
@@ -561,10 +563,14 @@ audiounit_stream_init(cubeb * context, cubeb_stream ** stream, char const * stre
   assert(context);
   *stream = NULL;
 
+  /* We only support output stram params at this moment */
+  assert(input_stream_params == NULL);
+  assert(output_stream_params != NULL);
+
   memset(&ss, 0, sizeof(ss));
   ss.mFormatFlags = 0;
 
-  switch (stream_params.format) {
+  switch (output_stream_params->format) {
   case CUBEB_SAMPLE_S16LE:
     ss.mBitsPerChannel = 16;
     ss.mFormatFlags |= kAudioFormatFlagIsSignedInteger;
@@ -589,8 +595,8 @@ audiounit_stream_init(cubeb * context, cubeb_stream ** stream, char const * stre
 
   ss.mFormatID = kAudioFormatLinearPCM;
   ss.mFormatFlags |= kLinearPCMFormatFlagIsPacked;
-  ss.mSampleRate = stream_params.rate;
-  ss.mChannelsPerFrame = stream_params.channels;
+  ss.mSampleRate = output_stream_params->rate;
+  ss.mChannelsPerFrame = output_stream_params->channels;
 
   ss.mBytesPerFrame = (ss.mBitsPerChannel / 8) * ss.mChannelsPerFrame;
   ss.mFramesPerPacket = 1;
