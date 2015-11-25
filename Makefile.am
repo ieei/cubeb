@@ -78,6 +78,7 @@ src_libcubeb_la_LDFLAGS = -export-symbols-regex '^cubeb_' $(platform_lib) -no-un
 check_PROGRAMS = test/test_sanity \
 								 test/test_tone \
 								 test/test_audio \
+								 test/test_capture \
 								 test/test_latency \
 								 test/test_devices \
 								 $(NULL)
@@ -87,6 +88,9 @@ test_test_sanity_LDADD = -lm src/libcubeb.la $(platform_lib)
 
 test_test_tone_SOURCES = test/test_tone.cpp
 test_test_tone_LDADD = -lm src/libcubeb.la $(platform_lib)
+
+test_test_capture_SOURCES = test/test_capture.cpp
+test_test_capture_LDADD = -lm src/libcubeb.la $(platform_lib)
 
 test_test_audio_SOURCES = test/test_audio.cpp
 test_test_audio_LDADD = -lm src/libcubeb.la $(platform_lib)
