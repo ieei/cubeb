@@ -61,25 +61,39 @@ int audiotrack_init(cubeb ** context, char const * context_name);
 int kai_init(cubeb ** context, char const * context_name);
 #endif
 
-int
+static int
 validate_stream_params(cubeb_stream_params * input_stream_params,
-					   cubeb_stream_params * output_stream_params)
+    cubeb_stream_params * output_stream_params)
 {
-  // Rate and sample format must be the same for input and output.
-  if (output_stream_params->rate < 1000 || output_stream_params->rate > 192000 ||
-      output_stream_params->channels < 1 || output_stream_params->channels > 8 ||
-	  (input_stream_params && input_stream_params &&
-	  (input_stream_params->rate != output_stream_params->rate  ||
-	  input_stream_params->format != output_stream_params->format))) {
-    return CUBEB_ERROR_INVALID_FORMAT;
-  }
+  if (output_stream_params != NULL) {
+    if (output_stream_params->rate < 1000 || output_stream_params->rate > 192000 ||
+        output_stream_params->channels < 1 || output_stream_params->channels > 8)
+      return CUBEB_ERROR_INVALID_FORMAT;
 
-  switch (output_stream_params->format) {
-  case CUBEB_SAMPLE_S16LE:
-  case CUBEB_SAMPLE_S16BE:
-  case CUBEB_SAMPLE_FLOAT32LE:
-  case CUBEB_SAMPLE_FLOAT32BE:
-    return CUBEB_OK;
+    // Rate and sample format must be the same for input and output.
+    if (input_stream_params != NULL) {
+      if (input_stream_params->rate != output_stream_params->rate ||
+          input_stream_params->format != output_stream_params->format)
+        return CUBEB_ERROR_INVALID_FORMAT;
+    }
+
+    switch (output_stream_params->format) {
+      case CUBEB_SAMPLE_S16LE:
+      case CUBEB_SAMPLE_S16BE:
+      case CUBEB_SAMPLE_FLOAT32LE:
+      case CUBEB_SAMPLE_FLOAT32BE:
+        return CUBEB_OK;
+    }
+  } else if (input_stream_params != NULL) {
+    switch (input_stream_params->format) {
+      case CUBEB_SAMPLE_S16LE:
+      case CUBEB_SAMPLE_S16BE:
+      case CUBEB_SAMPLE_FLOAT32LE:
+      case CUBEB_SAMPLE_FLOAT32BE:
+        return CUBEB_OK;
+    }
+  } else {
+    return CUBEB_ERROR_INVALID_PARAMETER;
   }
 
   return CUBEB_ERROR_INVALID_FORMAT;
