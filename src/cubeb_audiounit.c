@@ -122,12 +122,54 @@ audiotimestamp_to_latency(AudioTimeStamp const * tstamp, cubeb_stream * stream)
 }
 
 static OSStatus
-audiounit_io_callback(void * user_ptr, AudioUnitRenderActionFlags * flags,
+audiounit_input_callback(void * user_ptr, AudioUnitRenderActionFlags * flags,
     AudioTimeStamp const * tstamp, UInt32 bus, UInt32 nframes,
     AudioBufferList * bufs)
 {
   cubeb_stream * stream = user_ptr;
-  long inframes, outframes, curframes;
+  long outframes;
+  void * outbuf = NULL, * inbuf = NULL;
+
+  pthread_mutex_lock(&stream->mutex);
+
+  assert(stream->input_unit != NULL);
+  assert(AU_IN_BUS == bus);
+
+  /* FIXME: kAudioUnitErr_TooManyFramesToProcess ????*/
+  OSStatus r = AudioUnitRender(stream->input_unit, flags, tstamp, bus,
+      nframes, &stream->input_buflst);
+  assert(r == noErr);
+
+  if (stream->input_converter == NULL) {
+    inbuf = stream->input_buflst.mBuffers[0].mData;
+  } else {
+    /* We will need to buffer */
+    assert(false);
+  }
+
+  if (stream->output_unit != NULL) {
+    // Full Duplex. We'll call data_callback in the AudioUnit output callback.
+    pthread_mutex_unlock(&stream->mutex);
+    return noErr;
+  }
+  pthread_mutex_unlock(&stream->mutex);
+
+  outframes = stream->data_callback(stream, stream->user_ptr, inbuf, outbuf, nframes);
+  if (outframes < 0) {
+    /* XXX handle this case. */
+    assert(false);
+    return noErr;
+  }
+  return noErr;
+}
+
+static OSStatus
+audiounit_output_callback(void * user_ptr, AudioUnitRenderActionFlags * flags,
+    AudioTimeStamp const * tstamp, UInt32 bus, UInt32 nframes,
+    AudioBufferList * bufs)
+{
+  cubeb_stream * stream = user_ptr;
+  long outframes, curframes;
   void * outbuf = NULL, * inbuf = NULL;
 
   pthread_mutex_lock(&stream->mutex);
@@ -146,82 +188,49 @@ audiounit_io_callback(void * user_ptr, AudioUnitRenderActionFlags * flags,
     return noErr;
   }
 
-  if (bus == AU_OUT_BUS) {
-    assert(bufs->mNumberBuffers == 1);
-    outbuf = bufs->mBuffers[0].mData;
+  assert(AU_OUT_BUS == bus);
 
-    if (stream->output_unit == stream->input_unit) {
-      /* Full duplex w/o use of ring buffer */
-      assert(false);
-    } else {
-      /* Output only or output side of full duplex */
-      curframes = nframes;
-      if (stream->input_unit != NULL) {
-        assert(false);
-      }
-    }
-  } else {
-    inframes = nframes;
+  assert(bufs->mNumberBuffers == 1);
+  outbuf = bufs->mBuffers[0].mData;
 
-    if (stream->output_unit != NULL) {
-      /* Input side of full duplex */
-      assert(false);
-    } else {
-      /* Input only */
-      OSStatus r;
-
-      /* FIXME: kAudioUnitErr_TooManyFramesToProcess ????*/
-      r = AudioUnitRender(stream->input_unit, flags, tstamp, bus,
-          nframes, &stream->input_buflst);
-      assert(r == noErr);
-
-      if (stream->input_converter == NULL) {
-        curframes = inframes;
-        inbuf = stream->input_buflst.mBuffers[0].mData;
-      } else {
-        /* We will need to buffer */
-        assert(false);
-      }
-    }
+  if (stream->input_unit != NULL) {
+    inbuf = stream->input_buflst.mBuffers[0].mData;
   }
 
   pthread_mutex_unlock(&stream->mutex);
-  outframes = stream->data_callback(stream, stream->user_ptr, inbuf, outbuf, curframes);
+  outframes = stream->data_callback(stream, stream->user_ptr, inbuf, outbuf, nframes);
   if (outframes < 0) {
     /* XXX handle this case. */
     assert(false);
     return noErr;
   }
 
-  if (bus == AU_OUT_BUS) {
-    AudioFormatFlags outaff;
-    float panning;
-    size_t outbpf;
+  AudioFormatFlags outaff;
+  float panning;
+  size_t outbpf;
 
-    pthread_mutex_lock(&stream->mutex);
-    outbpf = stream->output_desc.mBytesPerFrame;
-    stream->draining = (outframes < nframes);
-    stream->frames_played = stream->frames_queued;
-    stream->frames_queued += outframes;
+  pthread_mutex_lock(&stream->mutex);
+  outbpf = stream->output_desc.mBytesPerFrame;
+  stream->draining = (outframes < nframes);
+  stream->frames_played = stream->frames_queued;
+  stream->frames_queued += outframes;
 
-    outaff = stream->output_desc.mFormatFlags;
-    panning = (stream->output_desc.mChannelsPerFrame == 2) ? stream->panning : 0.0f;
-    pthread_mutex_unlock(&stream->mutex);
+  outaff = stream->output_desc.mFormatFlags;
+  panning = (stream->output_desc.mChannelsPerFrame == 2) ? stream->panning : 0.0f;
+  pthread_mutex_unlock(&stream->mutex);
 
-    /* Post process output samples*/
-    if ((UInt32) outframes < nframes) {
-      /* Clear missing frames (silence) */
-      memset(outbuf + outframes * outbpf, 0, (nframes - outframes) * outbpf);
-    }
-    /* Pan stereo */
-    if (panning != 0.0f) {
-      if (outaff & kAudioFormatFlagIsFloat)
-        cubeb_pan_stereo_buffer_float((float*)outbuf, outframes, panning);
-      else if (outaff & kAudioFormatFlagIsSignedInteger)
-        cubeb_pan_stereo_buffer_int((short*)outbuf, outframes, panning);
-    }
+  /* Post process output samples*/
+  if ((UInt32) outframes < nframes) {
+    /* Clear missing frames (silence) */
+    memset(outbuf + outframes * outbpf, 0, (nframes - outframes) * outbpf);
   }
-
+  /* Pan stereo */
+  if (panning != 0.0f) {
+    if (outaff & kAudioFormatFlagIsFloat)
+      cubeb_pan_stereo_buffer_float((float*)outbuf, outframes, panning);
+    else if (outaff & kAudioFormatFlagIsSignedInteger)
+      cubeb_pan_stereo_buffer_int((short*)outbuf, outframes, panning);
+  }
   return noErr;
 }
 
@@ -636,9 +645,8 @@ audio_stream_desc_init (AudioStreamBasicDescription  * ss,
 }
 
 static int
-audiounit_create_unit (AudioUnit * unit,
-    const cubeb_stream_params * input_stream_params,
-    const cubeb_stream_params * output_stream_params)
+audiounit_create_unit (AudioUnit * unit, bool is_input,
+    const cubeb_stream_params * stream_params)
 {
   AudioComponentDescription desc;
   AudioComponent comp;
@@ -657,27 +665,26 @@ audiounit_create_unit (AudioUnit * unit,
   if (AudioComponentInstanceNew(comp, unit) != 0)
     return CUBEB_ERROR;
 
-  enable = (input_stream_params != NULL) ? 1 : 0;
+  enable = 1;
   if (AudioUnitSetProperty(*unit, kAudioOutputUnitProperty_EnableIO,
-        kAudioUnitScope_Input, AU_IN_BUS, &enable, sizeof(UInt32)) != noErr)
+        is_input ? kAudioUnitScope_Input : kAudioUnitScope_Output,
+        is_input ? AU_IN_BUS : AU_OUT_BUS, &enable, sizeof(UInt32)) != noErr)
     return CUBEB_ERROR;
 
-  enable = (output_stream_params != NULL) ? 1 : 0;
+  enable = 0;
   if (AudioUnitSetProperty(*unit, kAudioOutputUnitProperty_EnableIO,
-        kAudioUnitScope_Output, AU_OUT_BUS, &enable, sizeof(UInt32)) != noErr)
+        is_input ? kAudioUnitScope_Output : kAudioUnitScope_Input,
+        is_input ? AU_OUT_BUS : AU_IN_BUS, &enable, sizeof(UInt32)) != noErr)
     return CUBEB_ERROR;
 
-  if (input_stream_params != NULL) {
-    devid = audiounit_get_default_device_id (CUBEB_DEVICE_TYPE_INPUT);
-    if (AudioUnitSetProperty(*unit, kAudioOutputUnitProperty_CurrentDevice,
-        kAudioUnitScope_Global, AU_IN_BUS, &devid, sizeof(AudioDeviceID)) != noErr)
-      return CUBEB_ERROR;
-  }
-  if (output_stream_params != NULL) {
-    devid = audiounit_get_default_device_id (CUBEB_DEVICE_TYPE_OUTPUT);
-    if (AudioUnitSetProperty(*unit, kAudioOutputUnitProperty_CurrentDevice,
-        kAudioUnitScope_Global, AU_OUT_BUS, &devid, sizeof(AudioDeviceID)) != noErr)
-      return CUBEB_ERROR;
+  devid = audiounit_get_default_device_id (is_input ? CUBEB_DEVICE_TYPE_INPUT
+                                                    : CUBEB_DEVICE_TYPE_OUTPUT);
+  int err = AudioUnitSetProperty(*unit, kAudioOutputUnitProperty_CurrentDevice,
+                                 kAudioUnitScope_Global,
+                                 is_input ? AU_IN_BUS : AU_OUT_BUS,
+                                 &devid, sizeof(AudioDeviceID));
+  if (err != noErr) {
+    return CUBEB_ERROR;
   }
 
   return CUBEB_OK;
@@ -708,9 +715,11 @@ audiounit_stream_init(cubeb * context, cubeb_stream ** stream, char const * stre
                       void * user_ptr)
 {
   cubeb_stream * stm;
-  AudioUnit unit;
+  AudioUnit input_unit;
+  AudioUnit output_unit;
   int ret;
-  AURenderCallbackStruct aurcbs;
+  AURenderCallbackStruct aurcbs_in;
+  AURenderCallbackStruct aurcbs_out;
   UInt32 size;
 #if 0
   unsigned int buffer_size, default_buffer_size;
@@ -729,17 +738,25 @@ audiounit_stream_init(cubeb * context, cubeb_stream ** stream, char const * stre
   pthread_mutex_unlock(&context->mutex);
 
   /* FIXME: Use device as arguments!? */
-  if ((ret = audiounit_create_unit (&unit,
-          input_stream_params, output_stream_params)) != CUBEB_OK)
-    return ret;
+  if (input_stream_params != NULL) {
+    if ((ret = audiounit_create_unit (&input_unit, true,
+            input_stream_params)) != CUBEB_OK)
+      return ret;
+  }
+
+  if (output_stream_params != NULL) {
+    if ((ret = audiounit_create_unit (&output_unit, false,
+            output_stream_params)) != CUBEB_OK)
+      return ret;
+  }
 
   stm = calloc(1, sizeof(cubeb_stream));
   assert(stm);
 
   /* These could be different in the future if we have both
    * fullduplex stream and different devices for input vs output */
-  stm->input_unit  = (input_stream_params  != NULL) ? unit : NULL;
-  stm->output_unit = (output_stream_params != NULL) ? unit : NULL;
+  stm->input_unit  = (input_stream_params  != NULL) ? input_unit : NULL;
+  stm->output_unit = (output_stream_params != NULL) ? output_unit : NULL;
   stm->context = context;
   stm->data_callback = data_callback;
   stm->state_callback = state_callback;
@@ -752,6 +769,7 @@ audiounit_stream_init(cubeb * context, cubeb_stream ** stream, char const * stre
   pthread_mutex_init(&stm->mutex, &attr);
   pthread_mutexattr_destroy(&attr);
 
+  stm->draining = false;
   stm->frames_played = 0;
   stm->frames_queued = 0;
   stm->current_latency_frames = 0;
@@ -837,18 +855,22 @@ audiounit_stream_init(cubeb * context, cubeb_stream ** stream, char const * stre
   }
 
   /* Set IO proc! */
-  aurcbs.inputProc = audiounit_io_callback;
-  aurcbs.inputProcRefCon = stm;
-  if (output_stream_params != NULL) {
-    if (AudioUnitSetProperty(stm->output_unit, kAudioUnitProperty_SetRenderCallback,
-          kAudioUnitScope_Global, AU_OUT_BUS, &aurcbs, sizeof(aurcbs)) != 0) {
+  aurcbs_in.inputProc = audiounit_input_callback;
+  aurcbs_in.inputProcRefCon = stm;
+  if (input_stream_params != NULL) {
+    assert(stm->input_unit != NULL);
+    if (AudioUnitSetProperty(stm->input_unit, kAudioOutputUnitProperty_SetInputCallback,
+          kAudioUnitScope_Global, AU_OUT_BUS, &aurcbs_in, sizeof(aurcbs_in)) != 0) {
       audiounit_stream_destroy(stm);
       return CUBEB_ERROR;
     }
   }
-  if (input_stream_params != NULL && (stm->input_converter != NULL || output_stream_params == NULL)) {
-    if (AudioUnitSetProperty(stm->input_unit, kAudioOutputUnitProperty_SetInputCallback,
-          kAudioUnitScope_Global, AU_IN_BUS, &aurcbs, sizeof(aurcbs)) != 0) {
+  aurcbs_out.inputProc = audiounit_output_callback;
+  aurcbs_out.inputProcRefCon = stm;
+  if (output_stream_params != NULL) {
+    assert(stm->output_unit != NULL);
+    if (AudioUnitSetProperty(stm->output_unit, kAudioUnitProperty_SetRenderCallback,
+          kAudioUnitScope_Global, AU_OUT_BUS, &aurcbs_out, sizeof(aurcbs_out)) != 0) {
       audiounit_stream_destroy(stm);
       return CUBEB_ERROR;
     }
@@ -899,13 +921,13 @@ audiounit_stream_init(cubeb * context, cubeb_stream ** stream, char const * stre
 #endif
 #endif
 
-  if (stm->output_unit != NULL &&
-      AudioUnitInitialize(stm->output_unit) != 0) {
+  if (stm->input_unit != NULL &&
+      AudioUnitInitialize(stm->input_unit) != 0) {
     audiounit_stream_destroy(stm);
     return CUBEB_ERROR;
   }
-  if (stm->input_unit != NULL && stm->input_unit != stm->output_unit &&
-      AudioUnitInitialize(stm->input_unit) != 0) {
+  if (stm->output_unit != NULL &&
+      AudioUnitInitialize(stm->output_unit) != 0) {
     audiounit_stream_destroy(stm);
     return CUBEB_ERROR;
   }
